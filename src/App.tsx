@@ -223,7 +223,7 @@ export default function App() {
       networkRef.current.broadcast({
         type: 'PLAYER_LIST_UPDATE',
         senderId: myPeerId,
-        payload: { players: newPlayers }
+        payload: { players: newPlayers, gridSize: config.gridSize }
       });
     }
   };
@@ -374,6 +374,9 @@ export default function App() {
 
       case 'PLAYER_LIST_UPDATE':
         setPlayers(payload.players);
+        if (payload.gridSize) {
+          setConfig(prev => ({ ...prev, gridSize: payload.gridSize }));
+        }
         break;
 
       case 'BINGO_CONFIG_UPDATE':
@@ -382,6 +385,9 @@ export default function App() {
 
       case 'STAGE_TRANSITION':
         setStage(payload.stage);
+        if (payload.gridSize) {
+          setConfig(prev => ({ ...prev, gridSize: payload.gridSize }));
+        }
         if (payload.stage === GameStage.THEME_SELECT) {
           setConfig(prev => ({ ...prev, themeChooserId: payload.themeChooserId }));
           setCalledKeywords([]);
@@ -394,7 +400,21 @@ export default function App() {
         break;
 
       case 'THEME_ANNOUNCEMENT':
-        setConfig(prev => ({ ...prev, theme: payload.theme }));
+        if (isHost && senderId !== myPeerId) {
+          // Broadcast to everyone else
+          networkRef.current?.broadcast({
+            type: 'THEME_ANNOUNCEMENT',
+            senderId: myPeerId,
+            payload: { theme: payload.theme, gridSize: config.gridSize }
+          });
+        }
+        setConfig(prev => {
+          const next = { ...prev, theme: payload.theme };
+          if (payload.gridSize) {
+            next.gridSize = payload.gridSize;
+          }
+          return next;
+        });
         appendLog(`[주제] 이번 게임의 빙고판 주제는 "${payload.theme}" 입니다! 단어를 채워 넣으세요.`);
         setStage(GameStage.BINGO_INPUT);
         playSoundEffect('success');
@@ -420,7 +440,7 @@ export default function App() {
             networkRef.current?.broadcast({
               type: 'STAGE_TRANSITION',
               senderId: myPeerId,
-              payload: { stage: GameStage.GAME_PLAY }
+              payload: { stage: GameStage.GAME_PLAY, gridSize: config.gridSize }
             });
             setStage(GameStage.GAME_PLAY);
 
@@ -546,11 +566,57 @@ export default function App() {
         appendLog('[대기] 게임이 초기화되었습니다. 방장의 시작을 대기 중입니다...');
         break;
 
+      case 'KEYWORD_CALL':
+        if (isHost) {
+          const pickedWord = payload.keyword;
+          const finder = players.find(p => p.id === senderId);
+          const callerNick = finder ? finder.nickname : '참여자';
+
+          const currentList = [...calledKeywords, pickedWord];
+          setCalledKeywords(currentList);
+
+          networkRef.current?.broadcast({
+            type: 'KEYWORD_CHECK_BROADCAST',
+            senderId: myPeerId,
+            payload: {
+              keyword: pickedWord,
+              calledKeywords: currentList,
+              senderNickname: callerNick
+            }
+          });
+
+          // Local Host check
+          handleMessage({
+            type: 'KEYWORD_CHECK_BROADCAST',
+            senderId: myPeerId,
+            payload: {
+              keyword: pickedWord,
+              calledKeywords: currentList,
+              senderNickname: callerNick
+            }
+          });
+
+          // Schedule next speed touch round
+          setTimeout(() => {
+            if (networkRef.current) {
+              triggerNextTouchRound();
+            }
+          }, 4000);
+        }
+        break;
+
       default:
         console.log('Unhandled peer packet event', type);
         break;
     }
   };
+
+  // Keep peer message handler always pointing to the latest React state (no stale closures)
+  useEffect(() => {
+    if (networkRef.current) {
+      networkRef.current.onMessageReceived = handleMessage;
+    }
+  }, [handleMessage]);
 
   // Host starts the speed touch countdown interval
   const triggerNextTouchRound = () => {
@@ -715,7 +781,8 @@ export default function App() {
       senderId: myPeerId,
       payload: {
         stage: GameStage.THEME_SELECT,
-        themeChooserId: nominee.id
+        themeChooserId: nominee.id,
+        gridSize: config.gridSize
       }
     });
 
@@ -724,7 +791,8 @@ export default function App() {
       senderId: myPeerId,
       payload: {
         stage: GameStage.THEME_SELECT,
-        themeChooserId: nominee.id
+        themeChooserId: nominee.id,
+        gridSize: config.gridSize
       }
     });
   };
@@ -743,19 +811,19 @@ export default function App() {
       networkRef.current?.broadcast({
         type: 'THEME_ANNOUNCEMENT',
         senderId: myPeerId,
-        payload: { theme: announcedTheme }
+        payload: { theme: announcedTheme, gridSize: config.gridSize }
       });
       handleMessage({
         type: 'THEME_ANNOUNCEMENT',
         senderId: myPeerId,
-        payload: { theme: announcedTheme }
+        payload: { theme: announcedTheme, gridSize: config.gridSize }
       });
     } else {
       // Sent back to host to broadcast
       networkRef.current?.sendMessage(targetRoomId, {
         type: 'THEME_ANNOUNCEMENT',
         senderId: myPeerId,
-        payload: { theme: announcedTheme }
+        payload: { theme: announcedTheme, gridSize: config.gridSize }
       });
     }
   };
@@ -807,7 +875,7 @@ export default function App() {
         networkRef.current?.broadcast({
           type: 'STAGE_TRANSITION',
           senderId: myPeerId,
-          payload: { stage: GameStage.GAME_PLAY }
+          payload: { stage: GameStage.GAME_PLAY, gridSize: config.gridSize }
         });
         setStage(GameStage.GAME_PLAY);
 
@@ -911,55 +979,6 @@ export default function App() {
       // Wait, let's look at the PeerJS events parser. We should map KEYWORD_CALL in Host messages!
     }
   };
-
-  // Listen to Client sending KEYWORD_CALL back to Host
-  useEffect(() => {
-    if (isHost && networkRef.current) {
-      const originalHandler = networkRef.current.onMessageReceived;
-      networkRef.current.onMessageReceived = (msg: PeerMessage) => {
-        if (originalHandler) originalHandler(msg);
-
-        // Host intercepts additional events
-        if (msg.type === 'KEYWORD_CALL') {
-          const pickedWord = msg.payload.keyword;
-          const finder = players.find(p => p.id === msg.senderId);
-          const callerNick = finder ? finder.nickname : '참여자';
-
-          const currentList = [...calledKeywords, pickedWord];
-          setCalledKeywords(currentList);
-
-          networkRef.current?.broadcast({
-            type: 'KEYWORD_CHECK_BROADCAST',
-            senderId: myPeerId,
-            payload: {
-              keyword: pickedWord,
-              calledKeywords: currentList,
-              senderNickname: callerNick
-            }
-          });
-
-          // Local Host check
-          handleMessage({
-            type: 'KEYWORD_CHECK_BROADCAST',
-            senderId: myPeerId,
-            payload: {
-              keyword: pickedWord,
-              calledKeywords: currentList,
-              senderNickname: callerNick
-            }
-          });
-
-          // Schedule next speed touch round
-          setTimeout(() => {
-            // Check if game stage hasn't ended already
-            if (networkRef.current) {
-              triggerNextTouchRound();
-            }
-          }, 4000);
-        }
-      };
-    }
-  }, [isHost, calledKeywords, players, stage]);
 
   // Click direct manually shout BINGO!
   const handleShoutBingoWinner = () => {
