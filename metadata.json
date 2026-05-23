@@ -1,0 +1,6 @@
+{
+  "name": "Speed Touch Bingo",
+  "description": "Serverless speed touch real-time P2P multiplayer bingo game with custom themes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
